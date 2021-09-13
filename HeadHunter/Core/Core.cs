@@ -33,11 +33,16 @@ namespace HeadHunter.Core
         private HeadHunterPlugin Plugin { get; set; }
 
         List<MyContractBlock> ContractBlocks = new List<MyContractBlock>();
+
         List<MyProgrammableBlock> HeadHunterProgramBlocks = new List<MyProgrammableBlock>();
 
         public HeadHunterContractsStorage ContractStorage { get; set; }
         public string NetworkTag { get; set; }
 
+        /// <summary>
+        /// Инициализация плагина при загрузке сервера
+        /// </summary>
+        /// <param name="plugin"></param>
         public void Init(HeadHunterPlugin plugin)
         {
             Plugin = plugin;
@@ -45,6 +50,9 @@ namespace HeadHunter.Core
             NetworkTag = "0x1HHNetwork";
         }
 
+        /// <summary>
+        /// Загрузка ранее записанных контрактов(при запуске/перезапуске)
+        /// </summary>
         private void LoadContracts()
         {
             var contractsFile = Path.Combine(Plugin.StoragePath, "HeadHunterContracts.cfg");
@@ -64,6 +72,10 @@ namespace HeadHunter.Core
                 }
             }
         }
+
+        /// <summary>
+        /// Сохранение текущего списка контрактов в файл
+        /// </summary>
         private void SaveContracts()
         {
             try
@@ -79,44 +91,63 @@ namespace HeadHunter.Core
             }
         }
 
+        /// <summary>
+        /// Добавление нового контракта за голову
+        /// </summary>
+        /// <param name="steamID">SteamID цели контракта</param>
         public void AddHeadHunterContract(ulong steamID)
         {
             try
             {
+                ///парсим строку определения кастомного контракта и пишем в новую переменную
                 MyDefinitionId definitionId;
                 MyDefinitionId.TryParse("MyObjectBuilder_ContractTypeDefinition/CustomContract", out definitionId);
 
+                ///Получаем интерфейс игрока на сервере
                 var player = PlayerUtils.GetPlayer(steamID);
+                ///Если игрока нет в сети или не существует - контракт не добавляется
                 if (player == null)
                     return;
+                ///Создаем описание контракта
                 var contractDescr = new ContractDescription(player.DisplayName);
+                ///в глобальные переменные пишем список контрактных блоков и загружаем ранее созданные контракты
                 GetContractBlocks();
                 LoadContracts();
+
+                ///блокируем список на изменение в других потоках
                 lock (ContractStorage)
                 {
+                    ///проверяем контракты, есть ли уже заказ на этого игрока
                     ContractBlocks.ForEach(contractBlock => {
                         if (ContractStorage.BountedPlayers.Where(x => x.SteamID == steamID).Count() > 0)
                         {
                             ContractStorage.BountedPlayers.Where(x => x.SteamID == steamID).ForEach(x => {
+                                ///если заказ найден проверяем остаток на награде 
+                                ///если награда 0 - контракты не добавляются в контрактные блоки
                                 if (x.Bounty == 0)
                                     return;
+
+                                ///если награда не 0 - создаем новый контракт
                                 var bounty = x.Bounty;
                                 var collateral = Plugin.Config.ContractCollateral;
-
                                 var contract = new MyContractCustom(definitionId, contractBlock.EntityId, bounty, collateral, 0, contractDescr.GetContractName(), contractDescr.GetDescription(), 10, -10, null);
+                                
+                                ///добавляем новый контракт в систему контрактов
                                 var contractAddResult = MyAPIGateway.ContractSystem.AddContract(contract);
+                                ///если добавление прошло успешно - записываем в список заказов новый контракт
                                 if (contractAddResult.Success)
                                 {
                                     var _contract = new HeadHunterContract() { contract_id = contractAddResult.ContractId, contract_condition_id = contractAddResult.ContractConditionId, State = MyAPIGateway.ContractSystem.GetContractState(contractAddResult.ContractId) };
                                     x.Contracts.Add(_contract);
                                 } else
                                 {
-                                    //Log.Info("failed add contract");
+                                    Log.Info("failed add contract");
                                 }
                             });
                         }
                     });
                 }
+                ///записываем контракты в файл
                 SaveContracts();
             } catch (Exception e)
             {
@@ -124,21 +155,26 @@ namespace HeadHunter.Core
                 Log.Error(e.StackTrace);
             }
         }
+        /// <summary>
+        /// Добавление заказа на игрока/добавление награды к существующему заказу
+        /// </summary>
+        /// <param name="steamID"></param>
+        /// <param name="bounty"></param>
         public void AddPlayerBounty(ulong steamID, int bounty)
         {
             try
             {
+                ///загружаем список заказов и проверяем есть ли уже на игрока с указанным SteamId заказ
                 LoadContracts();
-                //lock (ContractStorage)
-                //{
-
-                //}
+                
                 if (ContractStorage.BountedPlayers.Where(x => x.SteamID == steamID).Count() > 0)
                 {
+                    ///если заказ есть - добавляем к награде сумму bounty космокредитов
                     ContractStorage.BountedPlayers.Where(x => x.SteamID == steamID).ForEach(x => x.Bounty += bounty);
                 }
                 else
                 {
+                    ///если заказа нет - создаем новый и записываем в хранилище
                     var bountedPlayer = new BountedPlayer()
                     {
                         SteamID = steamID,
@@ -147,6 +183,7 @@ namespace HeadHunter.Core
                     };
                     ContractStorage.BountedPlayers.Add(bountedPlayer);
                 }
+                ///сохраняем заказы в файл
                 SaveContracts();
             } catch (Exception e)
             {
@@ -154,16 +191,22 @@ namespace HeadHunter.Core
                 Log.Error(e.StackTrace);
             }
         }
+
+        /// <summary>
+        /// Обновление статусов активных заказов
+        /// </summary>
         public void UpdateContracts()
         {
             try
             {
+                ///загружаем список заказов и смотрим есть ли там что-нибудь
                 LoadContracts();
                 if (ContractStorage.BountedPlayers.Count > 0)
                 {
                     lock (ContractStorage)
                     {
                         ContractStorage.BountedPlayers.ForEach(x => {
+                            ///для каждого найденного заказа обновляем статусы
                             if (x.Contracts.Count > 0)
                             {
                                 x.Contracts.ForEach(y => {
@@ -172,6 +215,7 @@ namespace HeadHunter.Core
                             }
                         });
                     }
+                    ///сохраняем список заказов в файл
                     SaveContracts();
                 }
             }
@@ -181,10 +225,16 @@ namespace HeadHunter.Core
                 Log.Error(e.StackTrace);
             }
         }
+
+
+        /// <summary>
+        /// Пересоздание неактивных контрактов
+        /// </summary>
         public void ReCreateInactiveContracts()
         {
             try
             {
+                ///если контракт был выполнен или отменен по какой то причине - удаляем его из списка активных контрактов 
                 LoadContracts();
                 if (ContractStorage.BountedPlayers.Count > 0)
                 {
@@ -193,6 +243,7 @@ namespace HeadHunter.Core
                         ContractStorage.BountedPlayers.ForEach(x => {
                             if (x.Contracts.Count > 0)
                             {
+                                ///добавляем контракты со статусом не Active в список на удаление
                                 var contractsToRemove = new List<HeadHunterContract>();
                                 x.Contracts.ForEach(y => {
                                     if (y.State != MyCustomContractStateEnum.Active)
@@ -201,11 +252,14 @@ namespace HeadHunter.Core
                                         contractsToRemove.Add(y);
                                     }
                                 });
+                                ///удаляем неактивные контракты
                                 contractsToRemove.ForEach(y => x.Contracts.Remove(y));
                             }
+                            ///создаем новые контракты в контрактных блоках(если осталась награда)
                             AddHeadHunterContract(x.SteamID);
                         });
                     }
+                    ///сохраняем обновленный список в файл
                     SaveContracts();
                 }
             }
@@ -217,25 +271,37 @@ namespace HeadHunter.Core
             
         }
 
+
+        /// <summary>
+        /// Обработчик события регистрации урона от игрока игроку
+        /// </summary>
+        /// <param name="targetPlayer">Жертва</param>
+        /// <param name="attackerPlayer">Фгрессор</param>
         internal void OnDamage(IMyPlayer targetPlayer, IMyPlayer attackerPlayer)
         {
+            ///лагает (((
+            ///скорее всего изза постоянного обновления контрактов при нанесении урона
             try
             {
                 LoadContracts();
                 lock (ContractStorage)
                 {
+                    ///проверяем есть ли в заказах игрок-жертва
                     if (ContractStorage.BountedPlayers.Where(x => x.SteamID == targetPlayer.SteamUserId).Count() > 0)
                     {
                         ContractStorage.BountedPlayers.Where(x => x.SteamID == targetPlayer.SteamUserId).ForEach(x =>
                         {
+                            ///проверяем есть ли активные контракты на жертву
                             if (x.Contracts.Count > 0)
                             {
                                 x.Contracts.ForEach(y => {
+                                    ///если агрессор - владелец контракта на жертву - проверяяем на эксплойты
                                     if (y.HunterSteamID == attackerPlayer.SteamUserId)
                                     {
+                                        ///если взял сам на себя контракт и атаковал сам себя (урон об воксели/структуры взял под дистанционное управление свою турель и выстрелил в себя)
                                         if (targetPlayer.SteamUserId == attackerPlayer.SteamUserId)
                                         {
-                                            //Log.Info($"activator steamID = bountedPlayerSteamID");
+                                            ///отменяем контракт
                                             if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, attackerPlayer.IdentityId))
                                             {
                                                 Log.Info($"contract removed sucess");
@@ -243,7 +309,8 @@ namespace HeadHunter.Core
                                         }
                                         else if (MyVisualScriptLogicProvider.GetPlayersFactionTag(targetPlayer.IdentityId) == null)
                                         {
-                                            //Log.Info($"activator not in faction");
+                                            ///заглушка от фарма
+                                            ///Игрок жертва должен находиться во фракции, если нет - отменяем контракт
                                             if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, attackerPlayer.IdentityId))
                                             {
                                                 Log.Info($"contract removed sucess");
@@ -251,19 +318,23 @@ namespace HeadHunter.Core
                                         }
                                         else if (MyVisualScriptLogicProvider.GetPlayersFactionTag(attackerPlayer.IdentityId) == null)
                                         {
-                                            Log.Info($"activator not in faction");
+                                            ///Игрок агрессор также должен находиться во фракции, если нет - удаляем контракт
                                             if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, targetPlayer.IdentityId))
                                             {
                                                 Log.Info($"contract removed sucess");
                                             }
-                                        }//если аттакер без фракции)
+                                        }
                                         else if (MyVisualScriptLogicProvider.GetPlayersFactionTag(targetPlayer.IdentityId) == MyVisualScriptLogicProvider.GetPlayersFactionTag(attackerPlayer.IdentityId))
                                         {
+                                            ///если охотник и жертва состоят в одной фракции - отменяем контракт
+                                            ///Защита от договорного фарма
                                             if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, attackerPlayer.IdentityId))
                                             {
                                                 Log.Info($"contract removed sucess");
                                             }
                                         }
+                                        //Фракции должны находиться друг с другом в состоянии войны
+                                        //не работает функция, возвращает null вне зависимости от статусов фракций по отношению друк к другу (((
                                         //else if (!MyVisualScriptLogicProvider.AreFactionsEnemies(MyVisualScriptLogicProvider.GetPlayersFactionTag(targetPlayer.IdentityId), MyVisualScriptLogicProvider.GetPlayersFactionTag(attackerPlayer.IdentityId)))
                                         //{
                                         //    Log.Info($"activator faction !enemy bountedPlayer faction");
@@ -277,6 +348,7 @@ namespace HeadHunter.Core
                                         //    }
                                         //}
                                         else {
+                                            ///если проверки пройдены - завершаем контракт и выплачиваем ревард
                                             if (MyAPIGateway.ContractSystem.TryFinishCustomContract(y.contract_id))
                                             {
                                                 Log.Info("contract finish sucess");
@@ -288,6 +360,7 @@ namespace HeadHunter.Core
                         });
 
                     }
+                    ///если жертва наносит урон по охотнику
                     else if (ContractStorage.BountedPlayers.Where(x => x.SteamID == attackerPlayer.SteamUserId).Count() > 0)
                     {
                         ContractStorage.BountedPlayers.Where(x => x.SteamID == attackerPlayer.SteamUserId).ForEach(x =>
@@ -297,9 +370,9 @@ namespace HeadHunter.Core
                                 x.Contracts.ForEach(y => {
                                     if (y.HunterSteamID == targetPlayer.SteamUserId)
                                     {
+                                        //те же самые проверки на эксплойты
                                         if (targetPlayer.SteamUserId == attackerPlayer.SteamUserId)
                                         {
-                                            //Log.Info($"activator steamID = bountedPlayerSteamID");
                                             if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, targetPlayer.IdentityId))
                                             {
                                                 Log.Info($"contract removed sucess");
@@ -324,15 +397,10 @@ namespace HeadHunter.Core
                                         else if (MyVisualScriptLogicProvider.GetPlayersFactionTag(targetPlayer.IdentityId) == MyVisualScriptLogicProvider.GetPlayersFactionTag(attackerPlayer.IdentityId))
                                         {
                                             Log.Info($"activator faction = bountedPlayer faction");
-                                            //if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, targetPlayer.IdentityId))
-                                            //{
-                                            //    Log.Info($"contract removed sucess");
-                                            //}
-                                            //else
-                                            //{
-                                            //    Log.Info($"contract removed failed");
-                                            //}
-                                            ////попробовать ничего не делать
+                                            if (MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, targetPlayer.IdentityId))
+                                            {
+                                                Log.Info($"contract removed sucess");
+                                            }
                                             return;
 
                                         }
@@ -350,6 +418,7 @@ namespace HeadHunter.Core
                                         //}
                                         else
                                         {
+                                            ///если все проверки пройдены - завершаем контракт выплачиваем вознаграждение
                                             if (MyAPIGateway.ContractSystem.TryFailCustomContract(y.contract_id))
                                             {
                                                 Log.Info("contract failed sucess");
@@ -369,11 +438,18 @@ namespace HeadHunter.Core
             }
             
         }
+
+
+        /// <summary>
+        /// Обработчик события взятия контракта в контрактном блоке
+        /// </summary>
+        /// <param name="contractID"></param>
+        /// <param name="player"></param>
         public void OnActivateContract(long contractID, IMyPlayer player)
         {
             try
             {
-                //Log.Info("Contract activated");
+                ///добавляем взятый контракт в список активных
                 LoadContracts();
                 lock (ContractStorage)
                 {
@@ -384,6 +460,7 @@ namespace HeadHunter.Core
                         });
                     });
                 }
+                ///сохраняем контракты в файл
                 SaveContracts();
             }
             catch (Exception e)
@@ -393,6 +470,12 @@ namespace HeadHunter.Core
             }
 
         }
+
+
+        /// <summary>
+        /// Обработчик события завершения контракта
+        /// </summary>
+        /// <param name="contractID"></param>
         public void OnFinishContract(long contractID)
         {
             try
@@ -401,6 +484,7 @@ namespace HeadHunter.Core
                 LoadContracts();
                 ContractStorage.BountedPlayers.Where(x => x.Contracts.Where(y => y.contract_id == contractID).Count() > 0).ForEach(x => {
                     //Log.Info($"contracts for player {x.SteamID}");
+                    ///если контракт был принят - удаляем его из блока и у игроков принявших контракт
                     x.Contracts.ForEach(y => {
                         if (y.contract_id != contractID && y.HunterSteamID != 0)
                         {
@@ -409,7 +493,9 @@ namespace HeadHunter.Core
                             MyAPIGateway.ContractSystem.TryAbandonCustomContract(y.contract_id, player.IdentityId);
                             MyAPIGateway.ContractSystem.RemoveContract(y.contract_id);
                             //Log.Info($"remove contract");
-                        } else if (y.contract_id != contractID && y.HunterSteamID == 0)
+                        } 
+                        /// если контракт не был принят - удаляем его из контрактного блока
+                        else if (y.contract_id != contractID && y.HunterSteamID == 0)
                         {
                             MyAPIGateway.ContractSystem.RemoveContract(y.contract_id);
                             //Log.Info($"remove contract");
@@ -417,11 +503,15 @@ namespace HeadHunter.Core
                         
                     });
                     //Log.Info($"try change bounty for target");
+                    ///вычитаем сумму вознаграждения из суммы за голову игрока
                     AddPlayerBounty(x.SteamID, -x.Bounty);
                     //Log.Info($"clear contracts");
+                    ///очищаем список активных контрактов
                     x.Contracts.Clear();
                 });
+                ///сохраняем список заказов в файл
                 SaveContracts();
+                ///пересоздаем контракты в контрактных блоках
                 ReCreateInactiveContracts();
             }
             catch (Exception e)
@@ -431,25 +521,36 @@ namespace HeadHunter.Core
             }
             
         }
+
+        /// <summary>
+        /// Обработчик события провала контракта
+        /// </summary>
+        /// <param name="contractID"></param>
+        /// <param name="player"></param>
         public void OnFailContract(long contractID, IMyPlayer player)
         {
             try
             {
                 //Log.Info("start failed contract");
                 LoadContracts();
+                ///эксплойт !!!!!!!!!!!
+                ///можно убивать охотника и апать себе награду в несколько раз и потом договариваться на слив 50/50 с другим игроком, как програмно запретить пока не придумал
                 ContractStorage.BountedPlayers.Where(x => x.Contracts.Where(y => y.contract_id == contractID).Count() > 0).ForEach(x => {
                     x.Contracts.ForEach(y => {
+                        ///меняем статус контракта 
                         if (y.HunterSteamID == player.SteamUserId)
                         {
                             y.State = MyCustomContractStateEnum.Invalid;
                         }
 
                     });
-                    //Log.Info("changing balance request");
+                    ///увеличиваем баланс жертвы на значение из конфига
                     PlayerUtils.GetPlayer(x.SteamID).RequestChangeBalance(x.Bounty / (Plugin.Config.KillingHunterRewardPercentage / 100));
                     //Log.Info("add bounty for killing hunter");
+                    ///добавляем к награде за голову значение из конфига
                     AddPlayerBounty(x.SteamID, x.Bounty / (Plugin.Config.HuntedPlayerBountyUpByKillingHunterPercentage / 100));
                 });
+                ///сохраняем и пересоздаем контракты
                 SaveContracts();
                 ReCreateInactiveContracts();
             }
@@ -460,6 +561,11 @@ namespace HeadHunter.Core
             }
             
         }
+
+
+        /// <summary>
+        /// Удаление неактивных контрактов 
+        /// </summary>
         public void RemoveInvalid()
         {
             try
@@ -470,6 +576,7 @@ namespace HeadHunter.Core
                     ContractStorage.BountedPlayers.ForEach(x => {
                         if (x.Contracts.Count > 0)
                         {
+                            ///добавляем в список контракты со статусом инактив 
                             var toRemove = new List<HeadHunterContract>();
                             x.Contracts.ForEach(y => {
                                 if (y.State == MyCustomContractStateEnum.Invalid)
@@ -477,10 +584,12 @@ namespace HeadHunter.Core
                                     toRemove.Add(y);
                                 }
                             });
+                            ///удаляем контракты 
                             toRemove.ForEach(y => x.Contracts.Remove(y));
                         }
                     });
                 }
+                ///сохраняем оставшиеся контакты в файл
                 SaveContracts();
             } catch (Exception e)
             {
@@ -488,18 +597,26 @@ namespace HeadHunter.Core
                 Log.Error(e.StackTrace);
             }
         }
+
+
+        /// <summary>
+        /// Получение всех контрактных блоков в мире игры
+        /// </summary>
         public void GetContractBlocks()
         {
             try
             {
                 ContractBlocks.Clear();
                 var entities = new HashSet<IMyEntity>();
+                ///собираем все сущности - структуры на сервере
                 MyAPIGateway.Entities.GetEntities(entities);
                 entities.OfType<IMyCubeGrid>().ForEach(entity =>
                 {
+                    ///для каждой структуры проверяем наличие в ней контрактного блока
                     (entity as MyCubeGrid).GridSystems.TerminalSystem.Blocks.OfType<MyContractBlock>().ToList().ForEach(contractBlock => {
                         if (PlayerUtils.IsAdmin(PlayerUtils.GetPlayer(contractBlock.OwnerId))/* || PlayerUtils.IsNpc(contractBlock.OwnerId)*/)
                         {
+                            ///если еще не был добавлен - добавляем в список
                             if (!ContractBlocks.Contains(contractBlock))
                                 ContractBlocks.Add(contractBlock);
                         }
@@ -512,6 +629,12 @@ namespace HeadHunter.Core
             }
             
         }
+
+
+        /// <summary>
+        /// Получает все програмные блоки для вставки скрипта регистрации игрока 
+        /// не реализовано
+        /// </summary>
         public void GetHeadHunterNetworkAdapters()
         {
             try
@@ -534,10 +657,17 @@ namespace HeadHunter.Core
             
         }
 
+        /// <summary>
+        /// Вывод списка заказов на lcd-панель
+        /// </summary>
         public void GetHeadHunterLcds()
         {
             try
             {
+                ///берем все lcd 
+                ///берем все lcd панели на сервере
+                ///ищем с именем определенным в конфиге
+                ///вставляем текст со списком заказов типа TOP 10
                 var entities = new HashSet<IMyEntity>();
                 MyAPIGateway.Entities.GetEntities(entities);
                 entities.OfType<IMyCubeGrid>().ForEach(entity =>
@@ -584,6 +714,13 @@ namespace HeadHunter.Core
         {
             //todo
         }
+
+
+        /// <summary>
+        /// Метод для получения интерфейса игрока в случае если огонь велся не с ручного оружия
+        /// </summary>
+        /// <param name="entityID"></param>
+        /// <returns></returns>
         public IMyPlayer GetPlayer(long entityID)
         {
             
@@ -625,6 +762,7 @@ namespace HeadHunter.Core
                         player = PlayerUtils.GetPlayer((entityById as IMyHandheldGunObject<MyToolBase>).OwnerIdentityId);
                         break;
                     default:
+                        ///если не удалось определить по какой причине умер игрок
                         Log.Warn("Undetected kill type:");
                         Log.Warn("> Name: " + entityById.DisplayName);
                         Log.Warn(string.Format("> Type: {0}", (object)((object)entityById).GetType()));
